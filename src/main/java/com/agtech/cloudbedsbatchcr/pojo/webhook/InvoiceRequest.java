@@ -1,14 +1,17 @@
 package com.agtech.cloudbedsbatchcr.pojo.webhook;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class InvoiceRequest {
-    private Long propertyID;
-    private String propertyID_str;
-    private String reservationID;
-    private String invoiceID;
-    private String version;
-    private String event;
+    // Fiscal Documents webhook payload fields
+    @JsonAlias("propertyId")
+    private String propertyIdText;
+    private String documentKind;
+    private String id;
+    private String status;
     private Double timestamp;
 }

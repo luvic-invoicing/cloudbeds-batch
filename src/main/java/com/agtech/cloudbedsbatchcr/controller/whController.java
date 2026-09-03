@@ -65,20 +65,9 @@ public class whController {
     @PostMapping("/invoice")
     public ResponseEntity invoice(@RequestBody InvoiceRequest invoiceRequest) {
         try{
-            logger.info(String.format("Se recibe la factura %s del hotel %s", invoiceRequest.getInvoiceID(), invoiceRequest.getPropertyID()));
-            cbService.invoice(invoiceRequest, false);
-            return new ResponseEntity<>(HttpStatus.OK);
-        }catch (Exception ex){
-            ex.printStackTrace();
-            return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    @PostMapping("/void-invoice")
-    public ResponseEntity voidInvoice(@RequestBody InvoiceRequest invoiceRequest) {
-        try{
-            logger.info(String.format("Se recibe la factura %s del hotel %s", invoiceRequest.getInvoiceID(), invoiceRequest.getPropertyID()));
-            cbService.invoice(invoiceRequest, true);
+            String receivedIdentifier = invoiceRequest.getId();
+            logger.info(String.format("Se recibe el documento %s del hotel %s (status=%s)", receivedIdentifier, invoiceRequest.getPropertyIdText(), invoiceRequest.getStatus()));
+            cbService.invoice(invoiceRequest);
             return new ResponseEntity<>(HttpStatus.OK);
         }catch (Exception ex){
             ex.printStackTrace();
