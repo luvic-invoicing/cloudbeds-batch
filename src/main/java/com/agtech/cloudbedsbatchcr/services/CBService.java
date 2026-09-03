@@ -1,15 +1,15 @@
 package com.agtech.cloudbedsbatchcr.services;
 
 import com.agtech.cloudbedsbatchcr.entities.*;
+import com.agtech.cloudbedsbatchcr.exceptions.DocumentoFiscalNotFoundException;
+import com.agtech.cloudbedsbatchcr.exceptions.PropertyNotFoundException;
+import com.agtech.cloudbedsbatchcr.facturacion.*;
 import com.agtech.cloudbedsbatchcr.pojo.TipoCambio;
 import com.agtech.cloudbedsbatchcr.pojo.atvadapter.*;
 import com.agtech.cloudbedsbatchcr.pojo.cloudbeds.*;
 import com.agtech.cloudbedsbatchcr.pojo.webhook.*;
 import com.agtech.cloudbedsbatchcr.repositories.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
 import lombok.Data;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -24,14 +24,14 @@ import org.springframework.web.client.RestTemplate;
 
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.IOException;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Service
 public class CBService {
+
+    public static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final Logger logger = LogManager.getLogger(CBService.class);
 
@@ -58,6 +58,9 @@ public class CBService {
 
     @Autowired
     private  TaxService taxService;
+
+    @Autowired
+    private FacturacionFactoryProvider facturacionFactoryProvider;
 
     public PropertyResponse createProperty(Property property) throws Exception {
         try{
@@ -97,6 +100,7 @@ public class CBService {
                 properties.setCbAccount(account);
                 properties.setEnable(true);
                 properties.setCurrency(responseEntity.getBody().getData().getPropertyCurrency().getCurrencyCode());
+                properties.setCountryCode(resolveCountryCode(responseEntity.getBody().getData().getPropertyAddress()));
                 properties.setHeadOfficeNumber("1");
                 properties.setPosNumber("1");
                 properties.setTaxIdentificacion(property.getTaxIdentification());
@@ -187,6 +191,21 @@ public class CBService {
                     ex
             );
         }
+    }
+
+    private String resolveCountryCode(CBPropertyAddress propertyAddress) {
+        if (propertyAddress == null || propertyAddress.getPropertyCountry() == null) {
+            return "CR";
+        }
+
+        String country = propertyAddress.getPropertyCountry().trim().toUpperCase(Locale.ROOT);
+        if ("PA".equals(country) || country.contains("PANAMA")) {
+            return "PA";
+        }
+        if ("CR".equals(country) || country.contains("COSTA RICA")) {
+            return "CR";
+        }
+        return "CR";
     }
 
     public void changeAppState(AppState appState){
@@ -333,95 +352,58 @@ public class CBService {
 
     @Transactional
     public void invoice(InvoiceRequest invoiceRequest){
-        Long propertyId = null;
+
         try{
-            propertyId = resolvePropertyId(invoiceRequest);
-            if(propertyId == null){
-                logger.warn("No fue posible determinar propertyId del webhook recibido");
-                return;
-            }
+            String jsonRecibido = MAPPER.writeValueAsString(invoiceRequest);
 
-            boolean creditNoteRequest = "CANCEL_REQUESTED".equalsIgnoreCase(invoiceRequest.getStatus());
-            boolean enabledId = false;
-            String claveReferencia = "";
-
-            ObjectMapper mapper = new ObjectMapper();
-            String jsonRecibido = mapper.writeValueAsString(invoiceRequest);
             logger.info(String.format("JSON recibido %s", jsonRecibido));
 
-            Optional<CbProperties> cbProperty = propertiesRepository.findById(propertyId);
-            if (cbProperty.isPresent()) {
-                if(!cbProperty.get().getEnable()){
-                    logger.info(String.format("La propiedad %s (%s) no esta activa", cbProperty.get().getPropertyId(), cbProperty.get().getCompanyName()));
-                    return;
-                }
-                logger.info(String.format("Se obtiene informacion de la propiedad %s con nombre %s", propertyId, cbProperty.get().getCompanyName()));
-            } else {
-                logger.info(String.format("La propiedad con Id %s no esa registrada", propertyId));
-                throw new Exception(String.format("La propiedad con Id %s no esa registrada", propertyId));
-            }
+            final Long propertyId = resolvePropertyId(invoiceRequest)
+                    .orElseThrow(() -> new PropertyNotFoundException( "La propertyId no puede ser encontrada"));
 
-            String reservationIdWebhook = null;
-            String fiscalDocumentId = invoiceRequest.getId();
-            if(fiscalDocumentId == null || fiscalDocumentId.isEmpty()) {
-                logger.warn(String.format("Webhook sin id de fiscal document para propiedad %s. payload=%s", propertyId, jsonRecibido));
+            final String fiscalDocumentId = invoiceRequest.getId();
+            final CbProperties cbProperty = getCbProperties(propertyId);
+
+            final FiscalDocumentContext fiscalDocument = getFiscalDocumentContext(fiscalDocumentId, propertyId, cbProperty.getCbAccount().getApiKey())
+                    .orElseThrow(() -> new DocumentoFiscalNotFoundException(String.format("No existe documento fiscal para id %s", invoiceRequest.getId())));
+
+
+            FacturacionAbstractFactory facturacionFactory = facturacionFactoryProvider.obtenerFactory(cbProperty.getCountryCode());
+            FacturaDocumento facturaDocumento = facturacionFactory.crearFactura();
+            NotaCreditoDocumento notaCreditoDocumento = facturacionFactory.crearNotaCredito();
+            FacturaTransmisor facturaTransmisor = facturacionFactory.crearTransmisor();
+
+            logger.info(MAPPER.writeValueAsString(fiscalDocument.getInvoiceDetail()));
+
+            final String reservationId = fiscalDocument.getReservationId();
+            final String cloudbedsInvoiceId = fiscalDocument.getInvoiceDetail().getData().getInvoiceID();
+
+            final boolean creditNote = isCreditNote(invoiceRequest.getStatus(), cloudbedsInvoiceId, reservationId);
+
+            final Optional<CbInvoice> invoiceFound = invoiceAlreadyExists(cloudbedsInvoiceId, reservationId, propertyId, creditNote);
+
+            if(invoiceFound.isPresent()){
+                logger.warn(String.format("Ya existe la %s %s de la reservacion %s registrada en el sistema", (creditNote ? "Nota de crédito" : "Factura"), cloudbedsInvoiceId, reservationId));
                 return;
             }
-
-            FiscalDocumentContext fiscalDocument = getFiscalDocumentContext(fiscalDocumentId, propertyId, cbProperty.get().getCbAccount().getApiKey());
-            if((reservationIdWebhook == null || reservationIdWebhook.isEmpty()) && fiscalDocument.getReservationId() != null) {
-                reservationIdWebhook = fiscalDocument.getReservationId();
-            }
-
-            CBInvoiceResponse cbInvoiceResponse = fiscalDocument.getInvoiceDetail();
-            String cloudbedsInvoiceId = fiscalDocument.getInvoiceReference();
-            if(cloudbedsInvoiceId == null || cloudbedsInvoiceId.isEmpty()) {
-                cloudbedsInvoiceId = fiscalDocumentId;
-            }
-
-            logger.info(mapper.writeValueAsString(cbInvoiceResponse));
-
-            // En el flujo nuevo se usa el estado del fiscal document para decidir si procesar.
-            String fiscalStatus = fiscalDocument.getStatus() != null ? fiscalDocument.getStatus().toLowerCase() : "";
-            if(!creditNoteRequest && (fiscalStatus.equals("requested") || fiscalStatus.equals("pending_integration") || fiscalStatus.equals("open"))) {
-                logger.info(String.format("La factura %s de la reservacion %s recibida", cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID()));
-            } else if(creditNoteRequest && (fiscalStatus.equals("void_requested") || fiscalStatus.equals("cancel_requested") || fiscalStatus.equals("open"))) {
-                logger.info(String.format("La factura %s de la reservacion %s esta en estado de anulación", cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID()));
-            }else{
-                logger.info(String.format("La factura %s de la reservacion %s tiene un estado fiscal no procesable: %s", cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID(), fiscalDocument.getStatus()));
-                return;
-            }
-
-            CbInvoiceId invoiceId = new CbInvoiceId();
-            invoiceId.setInvoiceId(cloudbedsInvoiceId);
-            invoiceId.setReservationId(cbInvoiceResponse.getData().getReservationID() != null ? cbInvoiceResponse.getData().getReservationID() : reservationIdWebhook);
-            invoiceId.setPropertyId(propertyId);
-            invoiceId.setType(creditNoteRequest ? CbTypeInvoice.CREDIT_NOTE : CbTypeInvoice.INVOICE);
-
-            Optional<CbInvoice> invoiceFind = cbInvoiceRepository.findById(invoiceId);
-
-            if(invoiceFind.isPresent()){
-                logger.warn(String.format("Ya existe la %s %s de la reservacion %s registrada en el sistema", (creditNoteRequest ? "Nota de crédito" : "Factura"), cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID()));
-                return;
-            }
-
+            final CbInvoiceId newInvoiceId = invoiceFound.get().getInvoiceId();
             Optional<CbInvoice> originalInvoice = null;
-
-            if(creditNoteRequest){
+            String  claveReferencia = null;
+            if(creditNote){
                 //Se busca la factura original para validar que exista y no este anulada
                 CbInvoiceId originalInvoiceId = new CbInvoiceId();
                 originalInvoiceId.setInvoiceId(cloudbedsInvoiceId);
-                originalInvoiceId.setReservationId(cbInvoiceResponse.getData().getReservationID());
+                originalInvoiceId.setReservationId(reservationId);
                 originalInvoiceId.setPropertyId(propertyId);
                 originalInvoiceId.setType(CbTypeInvoice.INVOICE);
 
                 originalInvoice = cbInvoiceRepository.findById(originalInvoiceId);
 
                 if(!originalInvoice.isPresent()){
-                    logger.warn(String.format("La factura %s de la reservacion %s no existe para ser anulada en el sistema", cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID()));
+                    logger.warn(String.format("La factura %s de la reservacion %s no existe para ser anulada en el sistema", cloudbedsInvoiceId, fiscalDocument.getInvoiceDetail().getData().getReservationID()));
                     return;
                 } else if(originalInvoice.isPresent() && originalInvoice.get().getState().equals(CbStateInvoice.VOIDED)){
-                    logger.warn(String.format("La factura %s de la reservacion %s ya se encuentra anulada", cloudbedsInvoiceId, cbInvoiceResponse.getData().getReservationID()));
+                    logger.warn(String.format("La factura %s de la reservacion %s ya se encuentra anulada", cloudbedsInvoiceId, fiscalDocument.getInvoiceDetail().getData().getReservationID()));
                     return;
                 }else{
                     claveReferencia = originalInvoice.get().getClaveHacienda();
@@ -431,39 +413,38 @@ public class CBService {
             //Se crea la entidad reservation para guardar los datos
             CbInvoice cbInvoice = new CbInvoice();
             cbInvoice.setDate(new Date());
-            cbInvoice.setInvoiceId(invoiceId);
-            cbInvoice.setProperties(cbProperty.get());
+            cbInvoice.setInvoiceId(newInvoiceId);
+            cbInvoice.setProperties(cbProperty);
             cbInvoiceRepository.save(cbInvoice);
 
             //Se obtienen los impuestos parametrizados:
-            CBTaxes cbTaxes = taxService.getTaxes(cbProperty.get(), cbProperty.get().getCbAccount().getApiKey());
+            final CBTaxes cbTaxes = taxService.getTaxes(cbProperty, cbProperty.getCbAccount().getApiKey());
 
-            logger.info(mapper.writeValueAsString(cbTaxes));
+            logger.info(MAPPER.writeValueAsString(cbTaxes));
 
             //Se obtiene la información de la reservación:
-            CBReservationInfoResponse cbReservation = getReservationInformation(cbProperty.get(), invoiceId.getReservationId());
+            final CBReservationInfoResponse cbReservation = getReservationInformation(cbProperty, newInvoiceId.getReservationId());
 
-            cbInvoice.setJsonDataReservation(mapper.writeValueAsString(cbReservation));
-            cbInvoice.setJsonDataInvoice(mapper.writeValueAsString(cbInvoiceResponse));
-            cbInvoice.setConsecutiveInvoice(cbInvoiceResponse.getData().getNumber());
+            cbInvoice.setJsonDataReservation(MAPPER.writeValueAsString(cbReservation));
+            cbInvoice.setJsonDataInvoice(MAPPER.writeValueAsString(fiscalDocument.getInvoiceDetail()));
+            cbInvoice.setConsecutiveInvoice(fiscalDocument.getInvoiceDetail().getData().getNumber());
             cbInvoice.setJsonRequestCb(jsonRecibido);
             cbInvoice.setOthersMessage(fiscalDocumentId);
 
             Invoice invoice = new Invoice();
-            invoice.setCustomerId(cbProperty.get().getTaxIdentificacion());
-            invoice.setCode(cbProperty.get().getCurrency());
-            if(cbProperty.get().getCurrency().equals("USD")){
-                invoice.setExchange(getExchange(cbProperty.get().getCbAccount()));
+            invoice.setCustomerId(cbProperty.getTaxIdentificacion());
+            invoice.setCode(cbProperty.getCurrency());
+            if(cbProperty.getCurrency().equals("USD")){
+                invoice.setExchange(getExchange(cbProperty.getCbAccount()));
             }else{
                 invoice.setExchange(1.00);
             }
             invoice.setSystem(ErpSystem.CLOUD_BEDS_HOTEL);
 
-            if(creditNoteRequest){
-                invoice.setDocumentType(DocumentType.NCT);
-            }else {
-                invoice.setDocumentType(DocumentType.T);
-            }
+            invoice.setDocumentType(
+                    creditNote
+                            ? notaCreditoDocumento.obtenerTipoDocumento(false) : facturaDocumento.obtenerTipoDocumento(false)
+            );
 
             //Se obtiene la infomación del cliente.
             CBGuestInfo cbGuest = cbReservation.getData().getGuestList()
@@ -471,10 +452,11 @@ public class CBService {
                     .stream()
                     .findFirst()
                     .orElse(null);
-            logger.info(String.format("El tipo de documento registrado para el huesped %s en la reservación %s es %s", cbGuest.getGuestFirstName(), cbInvoiceResponse.getData().getReservationID(), cbGuest.getGuestDocumentType()));
+            logger.info(String.format("El tipo de documento registrado para el huesped %s en la reservación %s es %s", cbGuest.getGuestFirstName(), fiscalDocument.getInvoiceDetail().getData().getReservationID(), cbGuest.getGuestDocumentType()));
 
             String taxCompanyId = cbGuest.getCompanyTaxID();
-            String documentType = cbGuest.getGuestDocumentType().toLowerCase();
+            String documentType = cbGuest.getGuestDocumentType() != null ? cbGuest.getGuestDocumentType().toLowerCase() : "";
+            boolean identifiedCustomer = false;
 
             //Primero se valida que sea una empresa:
             if (taxCompanyId != null && !taxCompanyId.isEmpty()) {
@@ -484,17 +466,14 @@ public class CBService {
                     invoice.setClientId(taxCompanyId);
                     invoice.setClientName(cbGuest.getCompanyName());
                     invoice.setClientEmail(cbGuest.getGuestEmail());
-                    if(creditNoteRequest) {
-                        invoice.setDocumentType(DocumentType.NCF);
-                    }else{
-                        invoice.setDocumentType(DocumentType.F);
-                    }
+                    identifiedCustomer = true;
                 } catch (Exception ex) {
                     ex.printStackTrace();
                     logger.error(ex);
                 }
             }else if (documentType != null && !documentType.isEmpty()){
                 try {
+                    boolean enabledId = false;
                     if (documentType.equals("dni")) {
                         invoice.setClientIdType("01");
                         enabledId = true;
@@ -507,31 +486,37 @@ public class CBService {
                         invoice.setClientId(cbGuest.getGuestDocumentNumber());
                         invoice.setClientName(String.format("%s %s", cbGuest.getGuestFirstName(), cbGuest.getGuestLastName() != null ? cbGuest.getGuestLastName() : "").trim());
                         invoice.setClientEmail(cbGuest.getGuestEmail());
-                        if(creditNoteRequest) {
-                            invoice.setDocumentType(DocumentType.NCF);
-                        }else{
-                            invoice.setDocumentType(DocumentType.F);
-                        }
+                        identifiedCustomer = true;
                     }
                 } catch (Exception ex) {
                     ex.printStackTrace();
-                    logger.error(String.format("Se presentó un problema al procesar el cliente %s de la factura %s en la empresa %s", cbGuest.getGuestFirstName(), cbInvoiceResponse.getData().getReservationID(), cbProperty.get().getCompanyName()));
+                    logger.error(String.format("Se presentó un problema al procesar el cliente %s de la factura %s en la empresa %s", cbGuest.getGuestFirstName(), fiscalDocument.getInvoiceDetail().getData().getReservationID(), cbProperty.getCompanyName()));
                     logger.error(ex);
                 }
             }
 
+            invoice.setDocumentType(
+                    creditNote
+                            ? notaCreditoDocumento.obtenerTipoDocumento(identifiedCustomer)
+                            : facturaDocumento.obtenerTipoDocumento(identifiedCustomer)
+            );
+
             KeyGeneratorRequest request = new KeyGeneratorRequest();
-            request.setTipoDoc(creditNoteRequest ? "03" : (invoice.getDocumentType() == DocumentType.F ? "01": "04")); //Tipo de documento.
-            if(cbProperty.get().getPosNumber() != null){
-                request.setPuntoVenta(Integer.parseInt(cbProperty.get().getPosNumber()));
-                request.setMatriz(Integer.parseInt(cbProperty.get().getHeadOfficeNumber()));
-                invoice.setPointOfSale(Integer.parseInt(cbProperty.get().getPosNumber()));
+            request.setTipoDoc(
+                    creditNote
+                            ? notaCreditoDocumento.obtenerTipoDocClave(invoice.getDocumentType())
+                            : facturaDocumento.obtenerTipoDocClave(invoice.getDocumentType())
+            ); //Tipo de documento.
+            if(cbProperty.getPosNumber() != null){
+                request.setPuntoVenta(Integer.parseInt(cbProperty.getPosNumber()));
+                request.setMatriz(Integer.parseInt(cbProperty.getHeadOfficeNumber()));
+                invoice.setPointOfSale(Integer.parseInt(cbProperty.getPosNumber()));
             }else{
                 request.setPuntoVenta(1);
                 request.setMatriz(1);
                 invoice.setPointOfSale(1);
             }
-            request.setNumIdentification(cbProperty.get().getTaxIdentificacion());
+            request.setNumIdentification(cbProperty.getTaxIdentificacion());
             request.setProdSequence(true);
             KeyGeneratorResponse response = utilService.generateKey(request);
             invoice.setSecuencia(response.getCurrentConsecutiveNumber());
@@ -542,16 +527,15 @@ public class CBService {
             cbInvoice.setConsecutivoHacienda(response.getConsecutiveNumber());
             cbInvoice.setState(CbStateInvoice.PROGRESS);
 
-            if(creditNoteRequest) {
-                invoice.setReference(claveReferencia);
-                invoice.setOtherText(String.format("Nota de crédito a factura %s", cbInvoiceResponse.getData().getNumber()));
+            if(creditNote) {
+                notaCreditoDocumento.aplicarReferencia(invoice, fiscalDocument.getInvoiceDetail().getData().getNumber(), claveReferencia);
             }
 
-            logger.info(String.format("Se crea la clave %s en la reservación %s", response.getVoucherKey(), cbInvoiceResponse.getData().getReservationID()));
+            logger.info(String.format("Se crea la clave %s en la reservación %s", response.getVoucherKey(), fiscalDocument.getInvoiceDetail().getData().getReservationID()));
 
             invoice.setCodeSellCondition("01");
 
-            List<CBInvoiceItem> transactions = cbInvoiceResponse.getData().getItems();
+            List<CBInvoiceItem> transactions = fiscalDocument.getInvoiceDetail().getData().getItems();
 
             List<CBInvoiceItem> paymentsList = transactions.stream()
                     .filter(t -> t.getType().equals("payment"))
@@ -563,44 +547,7 @@ public class CBService {
             if (paymentsList.size() > 0) {
                 int contador = 1;
                 for (CBInvoiceItem paymentItem : paymentsList) {
-                    switch (paymentItem.getDescription().toLowerCase()) {
-                        case "credit card":
-                            codePaid = "02";   //Tarjeta Crédito
-                            break;
-                        case "tarjeta de credito":
-                            codePaid = "02";   //Tarjeta Crédito
-                            break;
-                        case "cash":
-                            codePaid = "01";   //Efectivo
-                            break;
-                        case "efectivo":
-                            codePaid = "01";   //Efectivo
-                            break;
-                        case "check":
-                            codePaid = "02";   //Tarjeta Crédito
-                            break;
-                        case "tarjeta de debito":
-                            codePaid = "02";   //Tarjeta Crédito
-                            break;
-                        case "bank transfer":
-                            codePaid = "04";   //Transf/Deposito cta. Bancaria
-                            break;
-                        case "transferencia bancaria":
-                            codePaid = "04";   //Transf/Deposito cta. Bancaria
-                            break;
-                        default:
-                            codePaid = "01";   //Otro
-                            // Autcompletar descripcion hasta 10 caracteres con * si la descripción es menor a 10 caracteres y no mayor a 100
-                            /*
-                            String desc = paymentItem.getDescription();
-                            if (desc.length() < 10) {
-                                desc = String.format("%-" + 10 + "s", desc).replace(' ', '*');
-                            } else if (desc.length() > 100) {
-                                desc = desc.substring(0, 100);
-                            }
-                             */
-                            break;
-                    }
+                    codePaid = facturaDocumento.obtenerCodigoMedioPago(paymentItem.getDescription());
                     if(contador == 1){
                         codesPaid.setCodePaidMethod1(codePaid);
                     } else if (contador == 2) {
@@ -638,7 +585,7 @@ public class CBService {
                         invoiceLine.setLineNumber(numberLine);
                         numberLine = numberLine + 1;
 
-                        invoiceLine.setProductCode(cbProperty.get().getProductCodeDefault());
+                        invoiceLine.setProductCode(cbProperty.getProductCodeDefault());
                         if (transaction.getType().equals("rate")) {
                             invoiceLine.setUnidMeasure("Al");
                         } else {
@@ -707,51 +654,123 @@ public class CBService {
                 invoice.setInvoiceOtherCharges(otherChargesList);
             }
 
-            //Se envia la factura de compra al servicio de rabbit MQ:
-            ConnectionFactory factory = new ConnectionFactory();
-            factory.setUsername(env.getProperty("atvadapter.rabbitmq.userName"));
-            factory.setPassword(env.getProperty("atvadapter.rabbitmq.password"));
-            factory.setVirtualHost(env.getProperty("atvadapter.rabbitmq.virtualHost"));
-            factory.setPort(5672);
-            factory.setHost(env.getProperty("atvadapter.rabbitmq.server"));
-            try (Connection connection = factory.newConnection();
-                 Channel channel = connection.createChannel()) {
-                channel.queueDeclare(env.getProperty("atvadapter.rabbitmq.queue"), true, false, false, null);
-
-                ObjectMapper objectMapper = new ObjectMapper();
-                String jsonInvoice = objectMapper.writeValueAsString(invoice);
+            //Se envia la factura al transmisor específico del país:
+            try {
+                String jsonInvoice = facturaTransmisor.transmitir(
+                        invoice,
+                        env.getProperty("atvadapter.rabbitmq.queue"),
+                        env.getProperty("atvadapter.rabbitmq.server"),
+                        Integer.parseInt(env.getProperty("atvadapter.rabbitmq.port", "5672")),
+                        env.getProperty("atvadapter.rabbitmq.userName"),
+                        env.getProperty("atvadapter.rabbitmq.password"),
+                        env.getProperty("atvadapter.rabbitmq.virtualHost")
+                );
                 cbInvoice.setJsonDataAtvAdapter(jsonInvoice);
                 cbInvoice.setState(CbStateInvoice.PROGRESS);
-
-                channel.basicPublish("", env.getProperty("atvadapter.rabbitmq.queue"), null, jsonInvoice.getBytes());
-
                 cbInvoiceRepository.save(cbInvoice);
-
-            } catch (IOException e1) {
-                e1.printStackTrace();
-                logger.error(String.format("Se presento un error 1 en la reservación %s de la propiedad %s", reservationIdWebhook, propertyId), e1);
-            } catch (TimeoutException e2) {
-                e2.printStackTrace();
-                logger.error(String.format("Se presento un error 2 en la reservación %s de la propiedad %s", reservationIdWebhook, propertyId), e2);
+            } catch (Exception txEx) {
+                //logger.error(String.format("Se presento un error al transmitir la reservación %s de la propiedad %s", reservationIdWebhook, propertyId), txEx);
             }
         } catch (Exception ex) {
             ex.printStackTrace();
-            logger.error(String.format("Excepción al procesar el documento fiscal %s en la propiedad %s", invoiceRequest.getId(), propertyId), ex);
+            //logger.error(String.format("Excepción al procesar el documento fiscal %s en la propiedad %s", invoiceRequest.getId(), propertyId), ex);
         }
     }
 
-    private Long resolvePropertyId(InvoiceRequest invoiceRequest) {
-        try {
-            if(invoiceRequest.getPropertyIdText() != null && !invoiceRequest.getPropertyIdText().isEmpty()) {
-                return Long.parseLong(invoiceRequest.getPropertyIdText());
-            }
-        } catch (Exception ex) {
-            logger.error("Error al convertir property id del webhook", ex);
-        }
-        return null;
+    private Optional<CbInvoice> invoiceAlreadyExists(String cloudbedsInvoiceId, String reservationId, Long propertyId, boolean creditNoteRequest) {
+        CbInvoiceId invoiceId = new CbInvoiceId();
+        invoiceId.setInvoiceId(cloudbedsInvoiceId);
+        invoiceId.setReservationId(reservationId);
+        invoiceId.setPropertyId(propertyId);
+        invoiceId.setType(creditNoteRequest ? CbTypeInvoice.CREDIT_NOTE : CbTypeInvoice.INVOICE);
+
+        return cbInvoiceRepository.findById(invoiceId);
     }
 
-    private FiscalDocumentContext getFiscalDocumentContext(String fiscalDocumentId, Long propertyId, String token) throws Exception {
+
+    private CbProperties getCbProperties(Long propertyId) {
+        CbProperties cbProperty = propertiesRepository.findById(propertyId)
+                .orElseThrow(() -> {
+                    String message = String.format(
+                            "La propiedad con Id %s no está registrada",
+                            propertyId
+                    );
+                    logger.info(message);
+                    return new PropertyNotFoundException(message);
+                });
+
+        if (!Boolean.TRUE.equals(cbProperty.getEnable())) {
+            logger.info(
+                    "La propiedad {} ({}) no está activa",
+                    cbProperty.getPropertyId(),
+                    cbProperty.getCompanyName()
+            );
+            throw new PropertyNotFoundException(String.format(
+                    "La propiedad %s (%s) no está activa",
+                    cbProperty.getPropertyId(),
+                    cbProperty.getCompanyName()
+            ));
+        }
+
+        logger.info(
+                "Se obtiene información de la propiedad {} con nombre {}",
+                propertyId,
+                cbProperty.getCompanyName()
+        );
+
+        return cbProperty;
+    }
+
+    private boolean isCreditNote(String requestStatus, String cloudbedsInvoiceId, String reservationId) throws Exception {
+        // El nuevo flujo fiscal solo debe procesar los eventos pendientes de integración y cancelación.
+        final String status = Optional.ofNullable(requestStatus).orElse("");
+        if ("CANCEL_REQUESTED".equalsIgnoreCase(status)) {
+            logger.info(
+                    "La factura {} de la reservación {} está en estado cancel_requested",
+                    cloudbedsInvoiceId,
+                    reservationId
+            );
+            return true;
+        }
+
+        if ("PENDING_INTEGRATION".equalsIgnoreCase(status)) {
+            logger.info(
+                    "La factura {} de la reservación {} recibida en estado pending_integration",
+                    cloudbedsInvoiceId,
+                    reservationId
+            );
+            return false;
+        }
+
+        logger.error(
+                "La factura {} de la reservación {} tiene un estado fiscal no procesable para el flujo nuevo: {}",
+                cloudbedsInvoiceId,
+                reservationId,
+                status
+        );
+
+        throw new Exception(String.format(
+                "La factura %s de la reservación %s tiene un estado fiscal no procesable para el flujo nuevo: %s",
+                cloudbedsInvoiceId,
+                reservationId,
+                status
+        ));
+    }
+
+    private Optional<Long> resolvePropertyId(InvoiceRequest invoiceRequest) {
+        return Optional.ofNullable(invoiceRequest.getPropertyIdText())
+                .filter(text -> !text.isEmpty())
+                .map(text -> {
+                    try {
+                        return Long.parseLong(text);
+                    } catch (NumberFormatException ex) {
+                        logger.error("Error al convertir property id del webhook: {}", text, ex);
+                        return null;
+                    }
+                });
+    }
+
+    private Optional<FiscalDocumentContext> getFiscalDocumentContext(String fiscalDocumentId, Long propertyId, String token) throws Exception {
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://api.cloudbeds.com/fiscal-document/v1/fiscal-documents")
                 .queryParam("limit", 1)
@@ -772,7 +791,7 @@ public class CBService {
 
         List<Map<String, Object>> documents = (List<Map<String, Object>>) response.getBody().get("fiscalDocuments");
         if (documents == null || documents.isEmpty()) {
-            throw new Exception(String.format("No existe documento fiscal para id %s", fiscalDocumentId));
+            return Optional.empty();
         }
 
         Map<String, Object> document = documents.get(0);
@@ -789,7 +808,7 @@ public class CBService {
         context.setStatus(valueToString(document.get("status")));
         context.setKind(valueToString(document.get("kind")));
         context.setInvoiceDetail(mapFiscalDocumentToLegacyInvoiceResponse(document, fiscalDocumentId));
-        return context;
+        return Optional.of(context);
     }
 
     private CBInvoiceResponse mapFiscalDocumentToLegacyInvoiceResponse(Map<String, Object> document, String fiscalDocumentId) {

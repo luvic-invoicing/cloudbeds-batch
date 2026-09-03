@@ -28,6 +28,8 @@ public class CbProperties {
 
     private String currency;
 
+    private String countryCode;
+
     private Boolean enable;
 
     //Punta de venta
