@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="DEBUG">
+    <Properties>
+        <Property name="LOG_PATH">./cloudbeds-batch-cr-logs</Property>
+        <Property name="LOG_PATTERN">%d{dd/MM/yyyy HH:mm:ss} %-5level: |Clase:%C| |Metodo:%M| |Linea: %L| %m%n
+        </Property>
+    </Properties>
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT" follow="true">
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <TimeBasedTriggeringPolicy interval="1"/>
+        </Console>
+        <RollingFile name="CloudbedsBatchCrError" fileName="${LOG_PATH}/CloudbedsBatchCrError.log"
+                     filePattern="${LOG_PATH}/CloudbedsBatchCrError-%d{yyyy-MM-dd}-%i.log">
+            <LevelRangeFilter minLevel="FATAL" maxLevel="ERROR" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1"/>
+                <SizeBasedTriggeringPolicy size="10 MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+        <RollingFile name="CloudbedsBatchCrInfo" fileName="${LOG_PATH}/CloudbedsBatchCrInfo.log"
+                     filePattern="${LOG_PATH}/CloudbedsBatchCrInfo-%d{yyyy-MM-dd}-%i.log">
+            <LevelRangeFilter minLevel="INFO" maxLevel="INFO" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout pattern="${LOG_PATTERN}"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1"/>
+                <SizeBasedTriggeringPolicy size="10 MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+    </Appenders>
+    <Loggers>
+        <Logger name="CloudbedsBatchCrError" level="info" additivity="false">
+            <appender-ref ref="CloudbedsBatchCrError" level="error"/>
+        </Logger>
+        <Logger name="CloudbedsBatchCrInfo" level="info" additivity="false">
+            <appender-ref ref="CloudbedsBatchCrInfo" level="info"/>
+        </Logger>
+        <Root level="info">
+            <AppenderRef ref="CloudbedsBatchCrError"/>
+            <AppenderRef ref="CloudbedsBatchCrInfo"/>
+        </Root>
+    </Loggers>
+</Configuration>

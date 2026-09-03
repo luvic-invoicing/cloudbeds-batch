@@ -1,0 +1,5 @@
+21/12/2023 23:06:38 INFO : |Clase:org.springframework.boot.StartupInfoLogger| |Metodo:logStarting| |Linea: 55| Starting CloudbedsBatchCrApplication using Java 1.8.0_202 on Hugo-PC with PID 13824 (C:\Proyectos\AgTech\cloudbeds-batch\target\classes started by Lenovo in C:\Proyectos\AgTech\cloudbeds-batch)
+21/12/2023 23:06:38 INFO : |Clase:org.springframework.boot.SpringApplication| |Metodo:logStartupProfileInfo| |Linea: 637| The following 1 profile is active: "dev"
+21/12/2023 23:06:39 INFO : |Clase:org.springframework.data.repository.config.RepositoryConfigurationDelegate| |Metodo:registerRepositoriesIn| |Linea: 132| Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+21/12/2023 23:06:39 INFO : |Clase:org.springframework.data.repository.config.RepositoryConfigurationDelegate| |Metodo:registerRepositoriesIn| |Linea: 201| Finished Spring Data repository scanning in 79 ms. Found 5 JPA repository interfaces.
+21/12/2023 23:06:40 INFO : |Clase:org.springframework.boot.web.embedded.tomcat.TomcatWebServer| |Metodo:initialize| |Linea: 108| Tomcat initialized with port(s): 8050 (http)
