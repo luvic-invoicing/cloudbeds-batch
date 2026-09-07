@@ -33,7 +33,7 @@ public class RabbitConfig implements RabbitListenerConfigurer
     }
 
     @Bean
-    Exchange cbNotificationExchange()
+    TopicExchange cbNotificationExchange()
     {
         return ExchangeBuilder.topicExchange( EXCHANGE_INBOUNDS ).build();
     }
