@@ -77,7 +77,7 @@ public class CBService {
 
             // Enviar la solicitud POST y recibir la respuesta
             ResponseEntity<CBProperty> responseEntity = restTemplate.exchange(
-                    String.format("%s?propertyID=%s", "https://api.cloudbeds.com/api/v1.2/getHotelDetails", property.getPropertyId()),
+                    String.format("%s?propertyID=%s", "https://api.cloudbeds.com/api/v1.3/getHotelDetails", property.getPropertyId()),
                     HttpMethod.GET,
                     requestEntity,
                     CBProperty.class);
@@ -88,7 +88,7 @@ public class CBService {
 
                 //Se registra los datos de la nueva propiedad:
                 CbAccount account = new CbAccount();
-                account.setApiUrl("https://api.cloudbeds.com/api/v1.2");
+                account.setApiUrl("https://api.cloudbeds.com/api/v1.3");
                 account.setApiAccountingUrl("https://api.cloudbeds.com/accounting/v1.0");
                 account.setEnabled(true);
                 account.setExchange(490.00);
@@ -485,42 +485,6 @@ public class CBService {
         return cbProperty;
     }
 
-    private boolean isCreditNote(String requestStatus, String cloudbedsInvoiceId, String reservationId) throws Exception {
-        // El nuevo flujo fiscal solo debe procesar los eventos pendientes de integración y cancelación.
-        final String status = Optional.ofNullable(requestStatus).orElse("");
-        if ("CANCEL_REQUESTED".equalsIgnoreCase(status)) {
-            logger.info(
-                    "La factura {} de la reservación {} está en estado cancel_requested",
-                    cloudbedsInvoiceId,
-                    reservationId
-            );
-            return true;
-        }
-
-        if ("PENDING_INTEGRATION".equalsIgnoreCase(status)) {
-            logger.info(
-                    "La factura {} de la reservación {} recibida en estado pending_integration",
-                    cloudbedsInvoiceId,
-                    reservationId
-            );
-            return false;
-        }
-
-        logger.error(
-                "La factura {} de la reservación {} tiene un estado fiscal no procesable para el flujo nuevo: {}",
-                cloudbedsInvoiceId,
-                reservationId,
-                status
-        );
-
-        throw new Exception(String.format(
-                "La factura %s de la reservación %s tiene un estado fiscal no procesable para el flujo nuevo: %s",
-                cloudbedsInvoiceId,
-                reservationId,
-                status
-        ));
-    }
-
     private Optional<Long> resolvePropertyId(InvoiceRequest invoiceRequest) {
         return Optional.ofNullable(invoiceRequest.getPropertyIdText())
                 .filter(text -> !text.isEmpty())
@@ -568,7 +532,7 @@ public class CBService {
         if (context.getInvoiceReference() == null || context.getInvoiceReference().isEmpty()) {
             context.setInvoiceReference(fiscalDocumentId);
         }
-        context.setReservationId(valueToString(document.get("sourceId")));
+        context.setReservationId(valueToString(document.get("sourceIdentifier")));
         context.setStatus(valueToString(document.get("status")));
         context.setKind(valueToString(document.get("kind")));
         context.setInvoiceDetail(mapFiscalDocumentToLegacyInvoiceResponse(document, fiscalDocumentId));
