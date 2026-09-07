@@ -708,7 +708,7 @@ public class CBService {
                             cbProperties.getCbAccount().getApiKey(),
                             cbProperties.getPropertyId(),
                             fiscalDocumentId,
-                            isCreditNote ? "CANCELED" : "COMPLETED_INTEGRATION",
+                            "COMPLETED_INTEGRATION",
                             null,
                             base64Document
                     );
@@ -732,7 +732,7 @@ public class CBService {
                             cbProperties.getCbAccount().getApiKey(),
                             cbProperties.getPropertyId(),
                             fiscalDocumentId,
-                            isCreditNote ? "OPEN" : "FAILED",
+                            "FAILED",
                             descripcion,
                             base64Document
                     );
