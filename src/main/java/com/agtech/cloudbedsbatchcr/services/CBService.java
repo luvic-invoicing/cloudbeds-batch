@@ -164,7 +164,7 @@ public class CBService {
 
             RestTemplate restTemplate = new RestTemplate();
             ResponseEntity<CBWebhookResponse> responseEntity = restTemplate.exchange(
-                    String.format("%s?propertyID=%s", "https://api.cloudbeds.com/api/v1.2/postWebhook", propertyID),
+                    String.format("%s?propertyID=%s", "https://api.cloudbeds.com/api/v1.3/postWebhook", propertyID),
                     HttpMethod.POST,
                     requestEntity,
                     CBWebhookResponse.class
@@ -538,7 +538,7 @@ public class CBService {
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://api.cloudbeds.com/fiscal-document/v1/fiscal-documents")
                 .queryParam("limit", 1)
-                .queryParam("filters[ids]", fiscalDocumentId)
+                .queryParam("ids", fiscalDocumentId)
                 .toUriString();
 
         RestTemplate restTemplate = new RestTemplate();
