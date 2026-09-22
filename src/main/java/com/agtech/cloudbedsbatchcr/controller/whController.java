@@ -65,8 +65,8 @@ public class whController {
     @PostMapping("/invoice")
     public ResponseEntity invoice(@RequestBody InvoiceRequest invoiceRequest) {
         try{
-            String receivedIdentifier = invoiceRequest.getId();
-            logger.info(String.format("Se recibe el documento %s del hotel %s (status=%s)", receivedIdentifier, invoiceRequest.getPropertyIdText(), invoiceRequest.getStatus()));
+            String fiscalDocumentId = invoiceRequest.getId();
+            logger.info(String.format("Se recibe el documento fiscal %s del hotel %s (status=%s)", fiscalDocumentId, invoiceRequest.getPropertyIdText(), invoiceRequest.getStatus()));
             cbService.invoice(invoiceRequest);
             return new ResponseEntity<>(HttpStatus.OK);
         }catch (Exception ex){

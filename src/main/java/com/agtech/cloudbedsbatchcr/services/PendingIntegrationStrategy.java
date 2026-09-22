@@ -106,7 +106,12 @@ public class PendingIntegrationStrategy implements DocumentoFiscalStrategy {
         request.setNumIdentification(cbProperty.getTaxIdentificacion());
         request.setProdSequence(true);
 
-        KeyGeneratorResponse keyResponse = utilService.generateKey(request);
+        KeyGeneratorResponse mockResponse = new KeyGeneratorResponse();
+        mockResponse.setConsecutiveNumber("12");
+        mockResponse.setSecurityCode("44");
+        mockResponse.setVoucherKey("12321");
+        mockResponse.setCurrentConsecutiveNumber(123L);
+        KeyGeneratorResponse keyResponse = mockResponse; //utilService.generateKey(request);
         invoice.setSecuencia(keyResponse.getCurrentConsecutiveNumber());
         invoice.setFiscalConsecutive(keyResponse.getConsecutiveNumber());
         invoice.setBillKey(keyResponse.getVoucherKey());

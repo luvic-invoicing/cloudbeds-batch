@@ -63,6 +63,15 @@ public class CBService {
     @Autowired
     private RabbitInvoicePublisher rabbitInvoicePublisher;
 
+    private static CbInvoiceId getCbInvoiceId(String cloudbedsInvoiceId, String reservationId, Long propertyId, CbTypeInvoice creditNoteRequest) {
+        CbInvoiceId invoiceId = new CbInvoiceId();
+        invoiceId.setInvoiceId(cloudbedsInvoiceId);
+        invoiceId.setReservationId(reservationId);
+        invoiceId.setPropertyId(propertyId);
+        invoiceId.setType(creditNoteRequest);
+        return invoiceId;
+    }
+
     public PropertyResponse createProperty(Property property) throws Exception {
         try {
             logger.info(String.format("Se solicita crear la propiedad con identificación %s e id de propiedad", property.getTaxIdentification(), property.getPropertyId()));
@@ -368,20 +377,16 @@ public class CBService {
 
             final CBInvoiceResponse cbInvoiceResponse = fiscalDocument.getInvoiceDetail();
             final String reservationId = fiscalDocument.getReservationId();
-            String cloudbedsInvoiceId = fiscalDocument.getInvoiceReference();
-            if (cloudbedsInvoiceId == null || cloudbedsInvoiceId.isEmpty()) {
-                cloudbedsInvoiceId = fiscalDocumentId;
-            }
 
             final DocumentoFiscalStrategy strategy = documentoFiscalStrategyProvider.resolve(invoiceRequest.getStatus());
             boolean creditNote = strategy.isCreditNote();
 
             logger.info(MAPPER.writeValueAsString(cbInvoiceResponse));
-            final CbInvoiceId incomingCbInvoiceId = getCbInvoiceId(cloudbedsInvoiceId, reservationId, propertyId, creditNote ? CbTypeInvoice.CREDIT_NOTE : CbTypeInvoice.INVOICE);
+            final CbInvoiceId incomingCbInvoiceId = getCbInvoiceId(fiscalDocumentId, reservationId, propertyId, creditNote ? CbTypeInvoice.CREDIT_NOTE : CbTypeInvoice.INVOICE);
 
             final Optional<CbInvoice> invoiceFound = cbInvoiceRepository.findById(incomingCbInvoiceId);
             if (invoiceFound.isPresent()) {
-                logger.warn(String.format("Ya existe la %s %s de la reservacion %s registrada en el sistema", creditNote ? "Nota de crédito" : "Factura", cloudbedsInvoiceId, reservationId));
+                logger.warn(String.format("Ya existe la %s %s de la reservacion %s registrada en el sistema", creditNote ? "Nota de crédito" : "Factura", fiscalDocumentId, reservationId));
                 return;
             }
 
@@ -406,22 +411,22 @@ public class CBService {
             logger.info(MAPPER.writeValueAsString(cbTaxes));
 
             if (creditNote) {
-                CbInvoiceId originalInvoiceId = getCbInvoiceId(cloudbedsInvoiceId, reservationId, propertyId, CbTypeInvoice.INVOICE);
+                CbInvoiceId originalInvoiceId = getCbInvoiceId(fiscalDocumentId, reservationId, propertyId, CbTypeInvoice.INVOICE);
                 final Optional<CbInvoice> originalInvoice = findInvoiceForCreditNote(originalInvoiceId);
                 if (!originalInvoice.isPresent()) {
-                    logger.warn(String.format("La factura %s de la reservacion %s no existe para ser anulada en el sistema", cloudbedsInvoiceId, reservationId));
+                    logger.warn(String.format("La factura %s de la reservacion %s no existe para ser anulada en el sistema", fiscalDocumentId, reservationId));
                     return;
                 }
                 if (CbStateInvoice.VOIDED.equals(originalInvoice.get().getState())) {
-                    logger.warn(String.format("La factura %s de la reservacion %s ya se encuentra anulada", cloudbedsInvoiceId, reservationId));
+                    logger.warn(String.format("La factura %s de la reservacion %s ya se encuentra anulada", fiscalDocumentId, reservationId));
                     return;
                 }
                 final String claveReferencia = originalInvoice.get().getClaveHacienda();
-                invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, cloudbedsInvoiceId, cbTaxes, exchange);
+                invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, fiscalDocumentId, cbTaxes, exchange);
                 // Aplicar referencia de la factura original
                 strategy.aplicarReferencia(invoice, cbInvoiceResponse.getData().getNumber(), claveReferencia);
             } else {
-                invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, cloudbedsInvoiceId, cbTaxes, exchange);
+                invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, fiscalDocumentId, cbTaxes, exchange);
             }
 
             // Guardar datos de clave y consecutivo desde el invoice construido
@@ -441,16 +446,6 @@ public class CBService {
     private Optional<CbInvoice> findInvoiceForCreditNote(CbInvoiceId originalInvoiceId) {
         return cbInvoiceRepository.findById(originalInvoiceId);
     }
-
-    private static CbInvoiceId getCbInvoiceId(String cloudbedsInvoiceId, String reservationId, Long propertyId, CbTypeInvoice creditNoteRequest) {
-        CbInvoiceId invoiceId = new CbInvoiceId();
-        invoiceId.setInvoiceId(cloudbedsInvoiceId);
-        invoiceId.setReservationId(reservationId);
-        invoiceId.setPropertyId(propertyId);
-        invoiceId.setType(creditNoteRequest);
-        return invoiceId;
-    }
-
 
     private CbProperties getCbProperties(Long propertyId) {
         CbProperties cbProperty = propertiesRepository.findById(propertyId)
@@ -532,67 +527,160 @@ public class CBService {
         if (context.getInvoiceReference() == null || context.getInvoiceReference().isEmpty()) {
             context.setInvoiceReference(fiscalDocumentId);
         }
-        context.setReservationId(valueToString(document.get("sourceIdentifier")));
+        String reservationId = valueToString(document.get("sourceIdentifier"));
+        context.setReservationId(reservationId);
         context.setStatus(valueToString(document.get("status")));
         context.setKind(valueToString(document.get("kind")));
-        context.setInvoiceDetail(mapFiscalDocumentToLegacyInvoiceResponse(document, fiscalDocumentId));
+        context.setInvoiceDetail(getFiscalDocumentInvoiceDetail(fiscalDocumentId, reservationId, propertyId, token));
         return Optional.of(context);
     }
 
-    private CBInvoiceResponse mapFiscalDocumentToLegacyInvoiceResponse(Map<String, Object> document, String fiscalDocumentId) {
+    private CBInvoiceResponse getFiscalDocumentInvoiceDetail(String fiscalDocumentId, String reservationId, Long propertyId, String token) throws Exception {
+        String url = UriComponentsBuilder
+                .fromHttpUrl(String.format("https://api.cloudbeds.com/fiscal-document/v1/fiscal-documents/%s/transactions", fiscalDocumentId))
+                .queryParam("nestTaxes", true)
+                .toUriString();
+
+        RestTemplate restTemplate = new RestTemplate();
+        HttpHeaders headers = new HttpHeaders();
+        headers.add("User-Agent", "Mozilla/5.0");
+        headers.add("x-api-key", token);
+        headers.add("X-PROPERTY-ID", String.valueOf(propertyId));
+        HttpEntity<?> entity = new HttpEntity<>(headers);
+        ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.GET, entity, Map.class);
+
+        if (response.getStatusCode() != HttpStatus.OK || response.getBody() == null) {
+            throw new Exception("No fue posible consultar las transacciones del documento fiscal");
+        }
+
+        List<Map<String, Object>> transactions = (List<Map<String, Object>>) response.getBody().get("transactions");
+        if (transactions == null) {
+            transactions = Collections.emptyList();
+        }
+
+        return mapFiscalDocumentToLegacyInvoiceResponse(transactions, fiscalDocumentId, reservationId, propertyId, token);
+    }
+
+    private CBInvoiceResponse mapFiscalDocumentToLegacyInvoiceResponse(List<Map<String, Object>> transactions, String fiscalDocumentId, String reservationId, Long propertyId, String token) {
         CBInvoiceResponse response = new CBInvoiceResponse();
         response.setSuccess(true);
 
         CBInvoiceData data = new CBInvoiceData();
-        data.setInvoiceID(firstString(document, "externalId", "number", "id"));
-        if (data.getInvoiceID() == null || data.getInvoiceID().isEmpty()) {
-            data.setInvoiceID(fiscalDocumentId);
-        }
-        data.setReservationID(firstString(document, "sourceId", "reservationID", "reservationId"));
-        data.setStatus(firstString(document, "status"));
-        data.setNumber(parseLong(firstString(document, "number")));
-        data.setItems(mapFiscalDocumentItems(document));
+        data.setInvoiceID(fiscalDocumentId);
+        data.setReservationID(reservationId);
+        data.setItems(mapFiscalDocumentItems(transactions, propertyId, token));
 
         response.setData(data);
         response.setStatusCode(200);
         return response;
     }
 
-    private List<CBInvoiceItem> mapFiscalDocumentItems(Map<String, Object> document) {
-        List<Map<String, Object>> rawItems = extractMapList(document, "items");
-        if (rawItems.isEmpty()) {
-            rawItems = extractMapList(document, "lines");
+    private List<CBInvoiceItem> mapFiscalDocumentItems(List<Map<String, Object>> transactions, Long propertyId, String token) {
+        List<String> transactionIds = new ArrayList<>();
+        for (Map<String, Object> transaction : transactions) {
+            String id = firstString(transaction, "id");
+            if (id != null) {
+                transactionIds.add(id);
+            }
         }
-        if (rawItems.isEmpty()) {
-            rawItems = extractMapList(document, "documentItems");
-        }
+        Map<String, String> externalRelationKindsById = fetchExternalRelationKinds(transactionIds, propertyId, token);
 
         List<CBInvoiceItem> mappedItems = new ArrayList<>();
-        for (Map<String, Object> rawItem : rawItems) {
+        for (Map<String, Object> transaction : transactions) {
             CBInvoiceItem item = new CBInvoiceItem();
-            item.setDescription(firstString(rawItem, "description", "name", "title"));
-            String type = firstString(rawItem, "type", "itemType", "category");
-            item.setType((type == null || type.isEmpty()) ? "charge" : type.toLowerCase());
-            item.setCurrency(firstString(rawItem, "currency", "currencyCode"));
+            item.setDescription(firstString(transaction, "description"));
+            item.setType(typeFromExternalRelationKind(externalRelationKindsById.get(firstString(transaction, "id"))));
+            item.setCurrency(firstString(transaction, "currency"));
+            item.setQuantity(1d);
 
-            Double quantity = parseDouble(firstString(rawItem, "quantity"));
-            item.setQuantity(quantity != null ? quantity : 1d);
-
-            Double totalAmount = parseDouble(firstString(rawItem, "totalAmount", "amount", "total", "grossAmount"));
-            Double netAmount = parseDouble(firstString(rawItem, "netAmount", "subtotal", "net"));
-            if (totalAmount == null && netAmount != null) {
-                totalAmount = netAmount;
-            }
-            if (netAmount == null && totalAmount != null) {
-                netAmount = totalAmount;
-            }
-
-            item.setTotalAmount(formatAmount(totalAmount));
-            item.setNetAmount(formatAmount(netAmount));
-            item.setTaxes(mapFiscalDocumentTaxes(rawItem));
+            Double amount = parseDouble(firstString(transaction, "amount"));
+            item.setTotalAmount(formatAmount(amount));
+            item.setNetAmount(formatAmount(amount));
+            item.setTaxes(mapFiscalDocumentTaxes(transaction));
             mappedItems.add(item);
         }
         return mappedItems;
+    }
+
+    // Cloudbeds ya no expone un campo "type"; se resuelve consultando externalRelationKind por transaccion
+    private Map<String, String> fetchExternalRelationKinds(List<String> transactionIds, Long propertyId, String apiKey) {
+        if (transactionIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        try {
+            Map<String, Object> idFilter = new LinkedHashMap<>();
+            idFilter.put("operator", "in");
+            idFilter.put("value", transactionIds);
+            idFilter.put("field", "id");
+
+            Map<String, Object> dateFilter = new LinkedHashMap<>();
+            dateFilter.put("operator", "greater_than_or_equal");
+            dateFilter.put("value", "2019-01-11T08:59:00Z");
+            dateFilter.put("field", "transaction_datetime");
+
+            Map<String, Object> filters = new LinkedHashMap<>();
+            filters.put("and", Arrays.asList(dateFilter, idFilter));
+
+            Map<String, Object> sort = new LinkedHashMap<>();
+            sort.put("field", "transaction_datetime");
+            sort.put("direction", "asc");
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("filters", filters);
+            body.put("pageToken", null);
+            body.put("limit", transactionIds.size());
+            body.put("sort", Collections.singletonList(sort));
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.add("x-api-key", apiKey);
+            headers.add("X-PROPERTY-ID", String.valueOf(propertyId));
+            HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+            RestTemplate restTemplate = new RestTemplate();
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    "https://api.cloudbeds.com/accounting/v1.0/transactions",
+                    HttpMethod.POST,
+                    requestEntity,
+                    Map.class);
+
+            if (response.getStatusCode() != HttpStatus.OK || response.getBody() == null) {
+                return Collections.emptyMap();
+            }
+
+            List<Map<String, Object>> transactions = (List<Map<String, Object>>) response.getBody().get("transactions");
+            if (transactions == null) {
+                return Collections.emptyMap();
+            }
+
+            Map<String, String> kindsById = new HashMap<>();
+            for (Map<String, Object> transaction : transactions) {
+                String id = valueToString(transaction.get("id"));
+                if (id != null) {
+                    kindsById.put(id, valueToString(transaction.get("externalRelationKind")));
+                }
+            }
+            return kindsById;
+        } catch (Exception ex) {
+            logger.error("Excepcion al consultar externalRelationKind de las transacciones", ex);
+            return Collections.emptyMap();
+        }
+    }
+
+    private String typeFromExternalRelationKind(String externalRelationKind) {
+        if (externalRelationKind == null) {
+            return "charge";
+        }
+        switch (externalRelationKind) {
+            case "PAYMENT":
+            case "PAYMENT_FEE":
+                return "payment";
+            case "ROOM":
+            case "ROOM_REVENUE":
+                return "rate";
+            default:
+                return "charge";
+        }
     }
 
     private List<CBInvoiceTax> mapFiscalDocumentTaxes(Map<String, Object> rawItem) {
