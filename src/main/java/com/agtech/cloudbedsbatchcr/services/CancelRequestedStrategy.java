@@ -36,14 +36,9 @@ public class CancelRequestedStrategy implements DocumentoFiscalStrategy {
     }
 
     @Override
-    public Invoice construirInvoice(
-            CbProperties cbProperty,
-            CBReservationInfoResponse cbReservation,
-            CBInvoiceResponse cbInvoiceResponse,
-            String cloudbedsInvoiceId,
-            CBTaxes cbTaxes,
-            Double exchange
-    ) throws Exception {
+    public Invoice construirInvoice(CbProperties cbProperty, CBReservationInfoResponse cbReservation,
+                                    CBInvoiceResponse cbInvoiceResponse, String cloudbedsInvoiceId,
+                                    CBTaxes cbTaxes, Double exchange) {
         Invoice invoice = new Invoice();
         invoice.setCustomerId(cbProperty.getTaxIdentificacion());
         invoice.setCode(cbProperty.getCurrency());
