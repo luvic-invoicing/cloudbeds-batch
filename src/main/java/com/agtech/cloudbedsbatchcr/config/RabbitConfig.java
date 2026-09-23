@@ -7,9 +7,12 @@ package com.agtech.cloudbedsbatchcr.config;
 
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.annotation.RabbitListenerConfigurer;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistrar;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory;
 import org.springframework.messaging.handler.annotation.support.MessageHandlerMethodFactory;
@@ -25,6 +28,18 @@ public class RabbitConfig implements RabbitListenerConfigurer
     public static final String CB_NOTIFICATION_QUEUE = "cb-notification-queue";
 
     public static final String EXCHANGE_INBOUNDS = "cb-notification-exchange";
+
+    @Bean
+    ConnectionFactory connectionFactory(Environment env)
+    {
+        CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
+        connectionFactory.setHost(env.getProperty("atvadapter.rabbitmq.server"));
+        connectionFactory.setPort(Integer.parseInt(env.getProperty("atvadapter.rabbitmq.port", "5672")));
+        connectionFactory.setUsername(env.getProperty("atvadapter.rabbitmq.userName"));
+        connectionFactory.setPassword(env.getProperty("atvadapter.rabbitmq.password"));
+        connectionFactory.setVirtualHost(env.getProperty("atvadapter.rabbitmq.virtualHost"));
+        return connectionFactory;
+    }
 
     @Bean
     Queue cbNotificationQueue()
