@@ -369,6 +369,8 @@ public class CBService {
             String jsonRecibido = MAPPER.writeValueAsString(invoiceRequest);
             logger.info(String.format("JSON recibido %s", jsonRecibido));
 
+            if (ignoreEvents(invoiceRequest)) return;
+
             final Long propertyId = resolvePropertyId(invoiceRequest)
                     .orElseThrow(() -> new PropertyNotFoundException("La propertyId no puede ser encontrada"));
 
@@ -444,6 +446,22 @@ public class CBService {
         } catch (Exception ex) {
             logger.error(String.format("Excepción al procesar el documento fiscal %s", invoiceRequest.getId()), ex);
         }
+    }
+
+    /**
+     * Ignora eventos que no requieren procesamiento por la integración fiscal.
+     * Solo {@code PENDING_INTEGRATION} genera una factura y {@code CANCEL_REQUESTED} una nota de crédito.
+     *
+     * @return {@code true} si el evento debe ignorarse; {@code false} si debe procesarse.
+     */
+    private boolean ignoreEvents(InvoiceRequest invoiceRequest) {
+        if (!"PENDING_INTEGRATION".equalsIgnoreCase(invoiceRequest.getStatus())
+                && !"CANCEL_REQUESTED".equalsIgnoreCase(invoiceRequest.getStatus())) {
+            logger.info("Se ignora el documento fiscal {} con estado {}; no requiere procesamiento de integración",
+                    invoiceRequest.getId(), invoiceRequest.getStatus());
+            return true;
+        }
+        return false;
     }
 
     private Optional<CbInvoice> findInvoiceForCreditNote(CbInvoiceId originalInvoiceId) {
@@ -616,12 +634,7 @@ public class CBService {
             item.setType(typeFromExternalRelationKind(externalRelationKindsById.get(firstString(transaction, "id"))));
             item.setCurrency(firstString(transaction, "currency"));
             item.setQuantity(1d);
-            Double amount;
-            if (item.getDescription().equalsIgnoreCase("Tarifa de la habitación - Deluxe Queen")) {
-                amount = parseDouble("100.00");
-            } else {
-                amount = parseDouble(firstString(transaction, "amount"));
-            }
+            Double amount = parseDouble(firstString(transaction, "amount"));
             item.setTotalAmount(formatAmount(amount));
             item.setNetAmount(formatAmount(amount));
             item.setTaxes(mapFiscalDocumentTaxes(transaction));
@@ -730,13 +743,8 @@ public class CBService {
             CBInvoiceTax tax = new CBInvoiceTax();
             tax.setCode(firstString(rawTax, "code", "taxCode", "internalCode"));
             tax.setName(firstString(rawTax, "name", "description", "label"));
-            if (tax.getName().equalsIgnoreCase("Impuesto reservacion")) {
-                tax.setAmount("8.00");
-                tax.setTaxID("819091");
-            } else {
-                tax.setAmount(formatAmount(parseDouble(firstString(rawTax, "amount", "taxAmount", "total"))));
-                tax.setTaxID(firstString(rawTax, "taxID", "taxId", "id", "code"));
-            }
+            tax.setAmount(formatAmount(parseDouble(firstString(rawTax, "amount", "taxAmount", "total"))));
+            tax.setTaxID(firstString(rawTax, "taxID", "taxId", "id", "code"));
             mappedTaxes.add(tax);
         }
         return mappedTaxes;
