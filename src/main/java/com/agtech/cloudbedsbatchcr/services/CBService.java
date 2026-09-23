@@ -400,7 +400,7 @@ public class CBService {
 
             cbInvoice.setJsonDataReservation(MAPPER.writeValueAsString(cbReservation));
             cbInvoice.setJsonDataInvoice(MAPPER.writeValueAsString(cbInvoiceResponse));
-            cbInvoice.setConsecutiveInvoice(cbInvoiceResponse.getData().getNumber());
+            cbInvoice.setConsecutiveInvoice(fiscalDocument.getNumber());
             cbInvoice.setJsonRequestCb(jsonRecibido);
             cbInvoice.setOthersMessage(fiscalDocumentId);
 
@@ -424,7 +424,7 @@ public class CBService {
                 final String claveReferencia = originalInvoice.get().getClaveHacienda();
                 invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, fiscalDocumentId, cbTaxes, exchange);
                 // Aplicar referencia de la factura original
-                strategy.aplicarReferencia(invoice, cbInvoiceResponse.getData().getNumber(), claveReferencia);
+                strategy.aplicarReferencia(invoice, fiscalDocument.getNumber(), claveReferencia);
             } else {
                 invoice = strategy.construirInvoice(cbProperty, cbReservation, cbInvoiceResponse, fiscalDocumentId, cbTaxes, exchange);
             }
@@ -533,6 +533,7 @@ public class CBService {
         }
         String reservationId = valueToString(document.get("sourceIdentifier"));
         context.setInvoiceID(fiscalDocumentId);
+        context.setNumber(valueToLong(document.get("number")));
         context.setReservationId(reservationId);
         context.setStatus(valueToString(document.get("status")));
         context.setKind(valueToString(document.get("kind")));
@@ -793,6 +794,17 @@ public class CBService {
         return value == null ? null : String.valueOf(value);
     }
 
+    /** Convierte cualquier valor a Long, devolviendo null si es null o no es parseable. */
+    private Long valueToLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        return parseLong(String.valueOf(value));
+    }
+
     // Estado: E: exitoso, R: rechazado
     public void notifyInvoiceCloudbeds(String clave, String estado, String descripcion) {
         try {
@@ -919,6 +931,7 @@ public class CBService {
         private String invoiceID;
         private String status;
         private String kind;
+        private Long number;
         private CBInvoiceResponse invoiceDetail;
     }
 }
