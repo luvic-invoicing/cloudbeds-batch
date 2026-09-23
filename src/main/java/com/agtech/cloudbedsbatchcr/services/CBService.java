@@ -493,6 +493,10 @@ public class CBService {
                 });
     }
 
+    /**
+     * Consulta el documento fiscal (fiscal-documents) para obtener sus metadatos (referencia, reservacion,
+     * estado, kind) y luego completa el detalle del invoice llamando a {@link #getFiscalDocumentInvoiceDetail}.
+     */
     private Optional<FiscalDocumentContext> getFiscalDocumentContext(String fiscalDocumentId, Long propertyId, String token) throws Exception {
         String url = UriComponentsBuilder
                 .fromHttpUrl("https://api.cloudbeds.com/fiscal-document/v1/fiscal-documents")
@@ -528,14 +532,21 @@ public class CBService {
             context.setInvoiceReference(fiscalDocumentId);
         }
         String reservationId = valueToString(document.get("sourceIdentifier"));
+        context.setInvoiceID(fiscalDocumentId);
         context.setReservationId(reservationId);
         context.setStatus(valueToString(document.get("status")));
         context.setKind(valueToString(document.get("kind")));
-        context.setInvoiceDetail(getFiscalDocumentInvoiceDetail(fiscalDocumentId, reservationId, propertyId, token));
+        context.setUserID(valueToString(document.get("userId")));
+        context.setDocumentIssueDate(valueToString(document.get("invoiceDate")));
+        context.setInvoiceDetail(getFiscalDocumentInvoiceDetail(fiscalDocumentId, propertyId, token));
         return Optional.of(context);
     }
 
-    private CBInvoiceResponse getFiscalDocumentInvoiceDetail(String fiscalDocumentId, String reservationId, Long propertyId, String token) throws Exception {
+    /**
+     * Obtiene las transacciones (items) del documento fiscal desde el endpoint de fiscal-documents/transactions
+     * y las mapea al formato legacy {@link CBInvoiceResponse} usado por las estrategias de facturacion.
+     */
+    private CBInvoiceResponse getFiscalDocumentInvoiceDetail(String fiscalDocumentId, Long propertyId, String token) throws Exception {
         String url = UriComponentsBuilder
                 .fromHttpUrl(String.format("https://api.cloudbeds.com/fiscal-document/v1/fiscal-documents/%s/transactions", fiscalDocumentId))
                 .queryParam("nestTaxes", true)
@@ -558,32 +569,41 @@ public class CBService {
             transactions = Collections.emptyList();
         }
 
-        return mapFiscalDocumentToLegacyInvoiceResponse(transactions, fiscalDocumentId, reservationId, propertyId, token);
+        return mapFiscalDocumentToLegacyInvoiceResponse(transactions, propertyId, token);
     }
 
-    private CBInvoiceResponse mapFiscalDocumentToLegacyInvoiceResponse(List<Map<String, Object>> transactions, String fiscalDocumentId, String reservationId, Long propertyId, String token) {
+    /**
+     * Construye el {@link CBInvoiceResponse} legacy a partir de la lista cruda de transacciones del documento fiscal.
+     */
+    private CBInvoiceResponse mapFiscalDocumentToLegacyInvoiceResponse(List<Map<String, Object>> transactions, Long propertyId, String token) {
         CBInvoiceResponse response = new CBInvoiceResponse();
         response.setSuccess(true);
 
         CBInvoiceData data = new CBInvoiceData();
-        data.setInvoiceID(fiscalDocumentId);
-        data.setReservationID(reservationId);
         data.setItems(mapFiscalDocumentItems(transactions, propertyId, token));
-
         response.setData(data);
         response.setStatusCode(200);
         return response;
     }
 
+    /**
+     * Mapea cada transaccion del documento fiscal a un {@link CBInvoiceItem}, resolviendo su "type"
+     * (payment/rate/charge) via {@link #fetchExternalRelationKinds}.
+     */
     private List<CBInvoiceItem> mapFiscalDocumentItems(List<Map<String, Object>> transactions, Long propertyId, String token) {
         List<String> transactionIds = new ArrayList<>();
+        String earliestTransactionDate = null;
         for (Map<String, Object> transaction : transactions) {
             String id = firstString(transaction, "id");
             if (id != null) {
                 transactionIds.add(id);
             }
+            String transactionDate = firstString(transaction, "transactionDate");
+            if (transactionDate != null && (earliestTransactionDate == null || transactionDate.compareTo(earliestTransactionDate) < 0)) {
+                earliestTransactionDate = transactionDate;
+            }
         }
-        Map<String, String> externalRelationKindsById = fetchExternalRelationKinds(transactionIds, propertyId, token);
+        Map<String, String> externalRelationKindsById = fetchExternalRelationKinds(transactionIds, earliestTransactionDate, propertyId, token);
 
         List<CBInvoiceItem> mappedItems = new ArrayList<>();
         for (Map<String, Object> transaction : transactions) {
@@ -602,8 +622,13 @@ public class CBService {
         return mappedItems;
     }
 
-    // Cloudbeds ya no expone un campo "type"; se resuelve consultando externalRelationKind por transaccion
-    private Map<String, String> fetchExternalRelationKinds(List<String> transactionIds, Long propertyId, String apiKey) {
+    /**
+     * Cloudbeds ya no expone un campo "type" en las transacciones del documento fiscal; se consulta
+     * el API de accounting/transactions por id para obtener el "externalRelationKind" real de cada una.
+     *
+     * @return mapa transactionId -> externalRelationKind (vacio si no se pudo consultar)
+     */
+    private Map<String, String> fetchExternalRelationKinds(List<String> transactionIds, String earliestTransactionDate, Long propertyId, String apiKey) {
         if (transactionIds.isEmpty()) {
             return Collections.emptyMap();
         }
@@ -613,9 +638,10 @@ public class CBService {
             idFilter.put("value", transactionIds);
             idFilter.put("field", "id");
 
+            // Usa la fecha mas antigua de las transacciones del documento como limite inferior del filtro
             Map<String, Object> dateFilter = new LinkedHashMap<>();
             dateFilter.put("operator", "greater_than_or_equal");
-            dateFilter.put("value", "2019-01-11T08:59:00Z");
+            dateFilter.put("value", earliestTransactionDate != null ? earliestTransactionDate : "1970-01-01T00:00:00Z");
             dateFilter.put("field", "transaction_datetime");
 
             Map<String, Object> filters = new LinkedHashMap<>();
@@ -667,6 +693,7 @@ public class CBService {
         }
     }
 
+    /** Traduce el externalRelationKind de Cloudbeds al "type" legacy (payment/rate/charge) usado por las estrategias. */
     private String typeFromExternalRelationKind(String externalRelationKind) {
         if (externalRelationKind == null) {
             return "charge";
@@ -683,6 +710,7 @@ public class CBService {
         }
     }
 
+    /** Extrae los impuestos anidados de una transaccion (poblados por nestTaxes=true) a {@link CBInvoiceTax}. */
     private List<CBInvoiceTax> mapFiscalDocumentTaxes(Map<String, Object> rawItem) {
         List<Map<String, Object>> rawTaxes = extractMapList(rawItem, "taxes");
         if (rawTaxes.isEmpty()) {
@@ -693,7 +721,7 @@ public class CBService {
         for (Map<String, Object> rawTax : rawTaxes) {
             CBInvoiceTax tax = new CBInvoiceTax();
             tax.setTaxID(firstString(rawTax, "taxID", "taxId", "id", "code"));
-            tax.setCode(firstString(rawTax, "code", "taxCode"));
+            tax.setCode(firstString(rawTax, "code", "taxCode", "internalCode"));
             tax.setName(firstString(rawTax, "name", "description", "label"));
             tax.setAmount(formatAmount(parseDouble(firstString(rawTax, "amount", "taxAmount", "total"))));
             mappedTaxes.add(tax);
@@ -701,6 +729,7 @@ public class CBService {
         return mappedTaxes;
     }
 
+    /** Devuelve la lista de mapas en {@code source.get(key)}, o lista vacia si no existe o no es una lista. */
     private List<Map<String, Object>> extractMapList(Map<String, Object> source, String key) {
         Object raw = source.get(key);
         if (!(raw instanceof List)) {
@@ -716,6 +745,7 @@ public class CBService {
         return mapped;
     }
 
+    /** Devuelve el primer valor no vacio de {@code source} entre las {@code keys} dadas, en orden. */
     private String firstString(Map<String, Object> source, String... keys) {
         for (String key : keys) {
             String value = valueToString(source.get(key));
@@ -726,6 +756,7 @@ public class CBService {
         return null;
     }
 
+    /** Parsea {@code value} como Double, devolviendo null si es nulo/vacio o invalido. */
     private Double parseDouble(String value) {
         if (value == null || value.isEmpty()) {
             return null;
@@ -737,6 +768,7 @@ public class CBService {
         }
     }
 
+    /** Parsea {@code value} como Long, devolviendo null si es nulo/vacio o invalido. */
     private Long parseLong(String value) {
         if (value == null || value.isEmpty()) {
             return null;
@@ -748,6 +780,7 @@ public class CBService {
         }
     }
 
+    /** Formatea un monto con 2 decimales (locale US); devuelve "0" si {@code value} es null. */
     private String formatAmount(Double value) {
         if (value == null) {
             return "0";
@@ -755,6 +788,7 @@ public class CBService {
         return String.format(Locale.US, "%.2f", value);
     }
 
+    /** Convierte cualquier valor a String, devolviendo null si es null. */
     private String valueToString(Object value) {
         return value == null ? null : String.valueOf(value);
     }
@@ -880,6 +914,9 @@ public class CBService {
     private static class FiscalDocumentContext {
         private String invoiceReference;
         private String reservationId;
+        private String userID;
+        private String documentIssueDate;
+        private String invoiceID;
         private String status;
         private String kind;
         private CBInvoiceResponse invoiceDetail;

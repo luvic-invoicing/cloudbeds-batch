@@ -149,6 +149,7 @@ public class CancelRequestedStrategy implements DocumentoFiscalStrategy {
                     InvoiceLine invoiceLine = new InvoiceLine();
                     invoiceLine.setLineNumber(lineNumber++);
                     invoiceLine.setProductCode(cbProperty.getProductCodeDefault());
+                    // "Al" = alquiler de uso habitacional (tarifa de hospedaje); "Unid" = bienes o mercancias vendidos por pieza (ej. 1 silla, 3 camisetas)
                     invoiceLine.setUnidMeasure("rate".equals(transaction.getType()) ? "Al" : "Unid");
                     invoiceLine.setDescription(transaction.getDescription());
                     invoiceLine.setQuantity(1);

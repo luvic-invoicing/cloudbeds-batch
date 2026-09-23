@@ -106,12 +106,7 @@ public class PendingIntegrationStrategy implements DocumentoFiscalStrategy {
         request.setNumIdentification(cbProperty.getTaxIdentificacion());
         request.setProdSequence(true);
 
-        KeyGeneratorResponse mockResponse = new KeyGeneratorResponse();
-        mockResponse.setConsecutiveNumber("12");
-        mockResponse.setSecurityCode("44");
-        mockResponse.setVoucherKey("12321");
-        mockResponse.setCurrentConsecutiveNumber(123L);
-        KeyGeneratorResponse keyResponse = mockResponse; //utilService.generateKey(request);
+        KeyGeneratorResponse keyResponse = utilService.generateKey(request);
         invoice.setSecuencia(keyResponse.getCurrentConsecutiveNumber());
         invoice.setFiscalConsecutive(keyResponse.getConsecutiveNumber());
         invoice.setBillKey(keyResponse.getVoucherKey());
@@ -155,6 +150,7 @@ public class PendingIntegrationStrategy implements DocumentoFiscalStrategy {
                     InvoiceLine invoiceLine = new InvoiceLine();
                     invoiceLine.setLineNumber(lineNumber++);
                     invoiceLine.setProductCode(cbProperty.getProductCodeDefault());
+                    // "Al" = alquiler de uso habitacional (tarifa de hospedaje); "Unid" = bienes o mercancias vendidos por pieza (ej. 1 silla, 3 camisetas)
                     invoiceLine.setUnidMeasure("rate".equals(transaction.getType()) ? "Al" : "Unid");
                     invoiceLine.setDescription(transaction.getDescription());
                     invoiceLine.setQuantity(1);
