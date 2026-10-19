@@ -24,6 +24,8 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.*;
 
 @Service
@@ -32,6 +34,9 @@ public class CBService {
     public static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final Logger logger = LogManager.getLogger(CBService.class);
+
+    private final RestTemplate accountingRestTemplate = new RestTemplate();
+    private final RestTemplate exchangeRestTemplate = new RestTemplate();
 
     @Autowired
     private Environment env;
@@ -324,10 +329,12 @@ public class CBService {
     private Double getExchange(CbAccount account) {
         try {
             LocalDate fechaActual = LocalDate.now();
+            Date lastExchangeDate = account.getLastExchangeDate();
+            LocalDate ultimaFecha = lastExchangeDate == null ? null
+                    : Instant.ofEpochMilli(lastExchangeDate.getTime()).atZone(ZoneId.systemDefault()).toLocalDate();
             logger.info(String.format("Se compara la fecha actual %s con la ultima fecha guardada %s", fechaActual, account.getLastExchangeDate()));
-            if (!account.getLastExchangeDate().equals(fechaActual)) {
+            if (!fechaActual.equals(ultimaFecha)) {
                 //https://api.hacienda.go.cr/indicadores/tc/dolar
-                RestTemplate restTemplate = new RestTemplate();
                 HttpHeaders headers = new HttpHeaders();
                 headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36");
                 HttpEntity<String> entity = new HttpEntity<>(headers);
@@ -335,7 +342,7 @@ public class CBService {
 
                 //TipoCambio tipoCambio = restTemplate.getForObject(url, TipoCambio.class);
 
-                ResponseEntity<TipoCambio> response = restTemplate.exchange(
+                ResponseEntity<TipoCambio> response = exchangeRestTemplate.exchange(
                         url,
                         HttpMethod.GET,
                         entity,
@@ -610,7 +617,7 @@ public class CBService {
 
     /**
      * Mapea cada transaccion del documento fiscal a un {@link CBInvoiceItem}, resolviendo su "type"
-     * (payment/rate/charge) via {@link #fetchExternalRelationKinds}.
+     * (payment/rate/charge) via {@link #fetchAccountingFieldById}.
      */
     private List<CBInvoiceItem> mapFiscalDocumentItems(List<Map<String, Object>> transactions, Long propertyId, String token) {
         List<String> transactionIds = new ArrayList<>();
@@ -625,7 +632,8 @@ public class CBService {
                 earliestTransactionDate = transactionDate;
             }
         }
-        Map<String, String> externalRelationKindsById = fetchExternalRelationKinds(transactionIds, earliestTransactionDate, propertyId, token);
+        Map<String, String> externalRelationKindsById = fetchAccountingFieldById(
+                transactionIds, earliestTransactionDate, propertyId, token, "externalRelationKind");
 
         List<CBInvoiceItem> mappedItems = new ArrayList<>();
         for (Map<String, Object> transaction : transactions) {
@@ -634,10 +642,10 @@ public class CBService {
             item.setType(typeFromExternalRelationKind(externalRelationKindsById.get(firstString(transaction, "id"))));
             item.setCurrency(firstString(transaction, "currency"));
             item.setQuantity(1d);
-            Double amount = parseDouble(firstString(transaction, "amount"));
-            item.setTotalAmount(formatAmount(amount));
-            item.setNetAmount(formatAmount(amount));
-            item.setTaxes(mapFiscalDocumentTaxes(transaction));
+            String amount = formatAmount(parseDouble(firstString(transaction, "amount")));
+            item.setTotalAmount(amount);
+            item.setNetAmount(amount);
+            item.setTaxes(mapFiscalDocumentTaxes(transaction, earliestTransactionDate, propertyId, token));
             mappedItems.add(item);
         }
         return mappedItems;
@@ -645,73 +653,78 @@ public class CBService {
 
     /**
      * Cloudbeds ya no expone un campo "type" en las transacciones del documento fiscal; se consulta
-     * el API de accounting/transactions por id para obtener el "externalRelationKind" real de cada una.
+     * el API de accounting/transactions por id para obtener el campo solicitado.
      *
-     * @return mapa transactionId -> externalRelationKind (vacio si no se pudo consultar)
+     * @return mapa transactionId -> valor del campo solicitado (vacio si no se pudo consultar)
      */
-    private Map<String, String> fetchExternalRelationKinds(List<String> transactionIds, String earliestTransactionDate, Long propertyId, String apiKey) {
+    private Map<String, String> fetchAccountingFieldById(List<String> transactionIds, String earliestTransactionDate,
+                                                       Long propertyId, String apiKey, String responseField) {
         if (transactionIds.isEmpty()) {
             return Collections.emptyMap();
         }
         try {
-            Map<String, Object> idFilter = new LinkedHashMap<>();
-            idFilter.put("operator", "in");
-            idFilter.put("value", transactionIds);
-            idFilter.put("field", "id");
-
-            // Usa la fecha mas antigua de las transacciones del documento como limite inferior del filtro
-            Map<String, Object> dateFilter = new LinkedHashMap<>();
-            dateFilter.put("operator", "greater_than_or_equal");
-            dateFilter.put("value", earliestTransactionDate != null ? earliestTransactionDate : "1970-01-01T00:00:00Z");
-            dateFilter.put("field", "transaction_datetime");
-
-            Map<String, Object> filters = new LinkedHashMap<>();
-            filters.put("and", Arrays.asList(dateFilter, idFilter));
-
-            Map<String, Object> sort = new LinkedHashMap<>();
-            sort.put("field", "transaction_datetime");
-            sort.put("direction", "asc");
-
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("filters", filters);
-            body.put("pageToken", null);
-            body.put("limit", transactionIds.size());
-            body.put("sort", Collections.singletonList(sort));
-
+            Map<String, Object> body = buildAccountingRequestBody(transactionIds, earliestTransactionDate);
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.add("x-api-key", apiKey);
             headers.add("X-PROPERTY-ID", String.valueOf(propertyId));
             HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(body, headers);
 
-            RestTemplate restTemplate = new RestTemplate();
-            ResponseEntity<Map> response = restTemplate.exchange(
+            ResponseEntity<Map> response = accountingRestTemplate.exchange(
                     "https://api.cloudbeds.com/accounting/v1.0/transactions",
                     HttpMethod.POST,
                     requestEntity,
                     Map.class);
 
             if (response.getStatusCode() != HttpStatus.OK || response.getBody() == null) {
+                logger.error("Respuesta invalida al consultar {} en Accounting: {}", responseField, response.getStatusCode());
                 return Collections.emptyMap();
             }
 
             List<Map<String, Object>> transactions = (List<Map<String, Object>>) response.getBody().get("transactions");
             if (transactions == null) {
+                logger.error("Accounting no devolvio la lista de transacciones al consultar {}", responseField);
                 return Collections.emptyMap();
             }
 
-            Map<String, String> kindsById = new HashMap<>();
+            Map<String, String> valuesById = new HashMap<>();
             for (Map<String, Object> transaction : transactions) {
                 String id = valueToString(transaction.get("id"));
                 if (id != null) {
-                    kindsById.put(id, valueToString(transaction.get("externalRelationKind")));
+                    valuesById.put(id, firstString(transaction, responseField));
                 }
             }
-            return kindsById;
-        } catch (Exception ex) {
-            logger.error("Excepcion al consultar externalRelationKind de las transacciones", ex);
+            return valuesById;
+        } catch (org.springframework.web.client.RestClientException ex) {
+            logger.error("Excepcion al consultar {} de las transacciones", responseField, ex);
             return Collections.emptyMap();
         }
+    }
+
+    private Map<String, Object> buildAccountingRequestBody(List<String> transactionIds, String earliestTransactionDate) {
+        Map<String, Object> idFilter = new LinkedHashMap<>();
+        idFilter.put("operator", "in");
+        idFilter.put("value", transactionIds);
+        idFilter.put("field", "id");
+
+        Map<String, Object> dateFilter = new LinkedHashMap<>();
+        dateFilter.put("operator", "greater_than_or_equal");
+        dateFilter.put("value", earliestTransactionDate != null ? earliestTransactionDate : "1970-01-01T00:00:00Z");
+        dateFilter.put("field", "transaction_datetime");
+
+        Map<String, Object> filters = new LinkedHashMap<>();
+        filters.put("and", Arrays.asList(dateFilter, idFilter));
+
+        Map<String, Object> sort = new LinkedHashMap<>();
+        sort.put("field", "transaction_datetime");
+        sort.put("direction", "asc");
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("filters", filters);
+        body.put("pageToken", null);
+        body.put("limit", transactionIds.size());
+        body.put("sort", Collections.singletonList(sort));
+        return body;
     }
 
     /** Traduce el externalRelationKind de Cloudbeds al "type" legacy (payment/rate/charge) usado por las estrategias. */
@@ -731,20 +744,36 @@ public class CBService {
         }
     }
 
-    /** Extrae los impuestos anidados de una transaccion (poblados por nestTaxes=true) a {@link CBInvoiceTax}. */
-    private List<CBInvoiceTax> mapFiscalDocumentTaxes(Map<String, Object> rawItem) {
+    /** Mapea los impuestos anidados usando como taxID el originId de Accounting, consultado por su id. */
+    private List<CBInvoiceTax> mapFiscalDocumentTaxes(Map<String, Object> rawItem, String earliestTransactionDate,
+                                                    Long propertyId, String token) {
         List<Map<String, Object>> rawTaxes = extractMapList(rawItem, "taxes");
         if (rawTaxes.isEmpty()) {
             rawTaxes = extractMapList(rawItem, "taxLines");
         }
+        Set<String> taxIds = new LinkedHashSet<>();
+        for (Map<String, Object> rawTax : rawTaxes) {
+            String taxId = firstString(rawTax, "id");
+            if (taxId == null) {
+                throw new IllegalStateException("El impuesto del documento fiscal no tiene id de transaccion");
+            }
+            taxIds.add(taxId);
+        }
+        Map<String, String> taxOriginIdsById = fetchAccountingFieldById(
+                new ArrayList<>(taxIds), earliestTransactionDate, propertyId, token, "originId");
 
         List<CBInvoiceTax> mappedTaxes = new ArrayList<>();
         for (Map<String, Object> rawTax : rawTaxes) {
+            String taxTransactionId = firstString(rawTax, "id");
+            String originId = taxOriginIdsById.get(taxTransactionId);
+            if (originId == null) {
+                throw new IllegalStateException("Accounting no devolvio originId para el impuesto con id " + taxTransactionId);
+            }
             CBInvoiceTax tax = new CBInvoiceTax();
             tax.setCode(firstString(rawTax, "code", "taxCode", "internalCode"));
             tax.setName(firstString(rawTax, "name", "description", "label"));
             tax.setAmount(formatAmount(parseDouble(firstString(rawTax, "amount", "taxAmount", "total"))));
-            tax.setTaxID(firstString(rawTax, "taxID", "taxId", "id", "code"));
+            tax.setTaxID(originId);
             mappedTaxes.add(tax);
         }
         return mappedTaxes;
