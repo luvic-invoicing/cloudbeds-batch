@@ -10,7 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping(value = "/api/wh/v1")
+@RequestMapping(value = "/api/wh/v2")
 public class whController {
 
     private static final Logger logger = LogManager.getLogger(whController.class);
@@ -62,7 +62,7 @@ public class whController {
         }
     }
 
-    @PostMapping("/invoice")
+    @PostMapping("/fiscal_document")
     public ResponseEntity invoice(@RequestBody InvoiceRequest invoiceRequest) {
         try{
             String fiscalDocumentId = invoiceRequest.getId();

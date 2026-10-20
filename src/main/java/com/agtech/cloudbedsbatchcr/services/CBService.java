@@ -133,21 +133,21 @@ public class CBService {
 
                 //Se registran únicamente los webhooks del nuevo flujo fiscal documents:
                 //1. Cambio de estado de la integracion:
-                createWebHook("http://144.202.35.15:8050/api/wh/v1/changeAppState",
+                createWebHook("http://144.202.35.15:8051/api/wh/v2/changeAppState",
                         "integration",
                         "appstate_changed",
                         property.getApiKey(),
                         property.getPropertyId());
 
                 //2. Fiscal documents webhook create
-                createWebHook("http://144.202.35.15:8050/api/wh/v1/invoice",
+                createWebHook("http://144.202.35.15:8051/api/wh/v2/fiscal_document",
                         "fiscal_document",
                         "create",
                         property.getApiKey(),
                         property.getPropertyId());
 
                 //3. Fiscal documents webhook update
-                createWebHook("http://144.202.35.15:8050/api/wh/v1/invoice",
+                createWebHook("http://144.202.35.15:8051/api/wh/v2/fiscal_document",
                         "fiscal_document",
                         "update",
                         property.getApiKey(),
